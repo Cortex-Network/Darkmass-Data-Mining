@@ -1,0 +1,25 @@
+local RemoteApproveSessionChannelState = class("RemoteApproveSessionChannelState")
+
+function RemoteApproveSessionChannelState:init(state_machine, shared_state)
+	self._shared_state = shared_state
+	self._time = 0
+end
+
+function RemoteApproveSessionChannelState:update(dt)
+	local shared_state = self._shared_state
+	self._time = self._time + dt
+
+	if shared_state.channel_id then
+		return "approved"
+	end
+
+	if shared_state.timeout < self._time then
+		Log.info("RemoteApproveSessionChannelState", "Timeout waiting for channel request %s", shared_state.peer_id)
+
+		return "timeout", {
+			game_reason = "timeout"
+		}
+	end
+end
+
+return RemoteApproveSessionChannelState

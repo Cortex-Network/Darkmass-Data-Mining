@@ -1,0 +1,141 @@
+local ShadingEnvironmentVolume = component("ShadingEnvironmentVolume")
+
+function ShadingEnvironmentVolume:init(unit)
+	self:enable(unit)
+end
+
+function ShadingEnvironmentVolume:enable(unit)
+	local environment_extension = ScriptUnit.fetch_component_extension(unit, "shading_environment_system")
+
+	if environment_extension then
+		self._extension = environment_extension
+		local fade_in_distance = self:get_data(unit, "fade_in_distance")
+		local blend_layer = self:get_data(unit, "blend_layer")
+		local override = self:get_data(unit, "override")
+		local shading_environment = self:get_data(unit, "shading_environment")
+		local shading_environment_slot_string = self:get_data(unit, "shading_environment_slot")
+		local shading_environment_slot = tonumber(shading_environment_slot_string)
+		local start_enabled = self:get_data(unit, "start_enabled")
+
+		if shading_environment and shading_environment ~= "" then
+			environment_extension:setup_from_component(fade_in_distance, blend_layer, override, shading_environment, shading_environment_slot, start_enabled)
+		else
+			Log.warning("ShadingEnvironmentVolume", "[Unit: %s, %s] A ShadingEnvironmentVolume is missing a ShadingEnvironment", unit, Unit.id_string(unit))
+		end
+	end
+end
+
+function ShadingEnvironmentVolume:disable(unit)
+end
+
+function ShadingEnvironmentVolume:destroy(unit)
+end
+
+function ShadingEnvironmentVolume:editor_init(unit)
+	if LevelEditor then
+		self._enabled = self:get_data(unit, "start_enabled")
+
+		if LevelEditor.register_shading_environment_volume then
+			if self._enabled then
+				local volume_data = {
+					fade_in_distance = self:get_data(unit, "fade_in_distance"),
+					blend_layer = self:get_data(unit, "blend_layer") or 1,
+					override = self:get_data(unit, "override"),
+					shading_environment = self:get_data(unit, "shading_environment"),
+					shading_environment_slot = self:get_data(unit, "shading_environment_slot")
+				}
+
+				LevelEditor:register_shading_environment_volume(unit, volume_data)
+			end
+		else
+			Application.console_send({
+				system = "Shading Environment Volume",
+				message = "You need to update your binaries, could not register shading environment volume with level editor!",
+				level = "error",
+				type = "message"
+			})
+		end
+	end
+end
+
+function ShadingEnvironmentVolume:enable_environment()
+	local extension = self._extension
+
+	if extension then
+		extension:enable()
+	end
+end
+
+function ShadingEnvironmentVolume:disable_environment()
+	local extension = self._extension
+
+	if extension then
+		extension:disable()
+	end
+end
+
+function ShadingEnvironmentVolume:editor_destroy(unit)
+	if LevelEditor and LevelEditor.unregister_shading_environment_volume and self._enabled then
+		LevelEditor:unregister_shading_environment_volume(unit)
+	end
+end
+
+ShadingEnvironmentVolume.component_data = {
+	fade_in_distance = {
+		ui_type = "number",
+		decimals = 0,
+		value = 1,
+		ui_name = "Fade in distance (m):",
+		step = 1
+	},
+	blend_layer = {
+		ui_type = "number",
+		decimals = 0,
+		value = 1,
+		ui_name = "Layer:",
+		step = 1
+	},
+	override = {
+		ui_type = "check_box",
+		value = false,
+		ui_name = "Override:"
+	},
+	shading_environment = {
+		ui_type = "resource",
+		preview = false,
+		value = "",
+		ui_name = "Shading environment:",
+		filter = "shading_environment"
+	},
+	shading_environment_slot = {
+		value = "-1",
+		ui_type = "combo_box",
+		ui_name = "Shading environment Slot",
+		options_keys = {
+			"-1 - None"
+		},
+		options_values = {
+			"-1"
+		}
+	},
+	start_enabled = {
+		ui_type = "check_box",
+		value = true,
+		ui_name = "Start Enabled"
+	},
+	extensions = {
+		"ShadingEnvironmentExtension"
+	},
+	inputs = {
+		enable_environment = {
+			accessibility = "public",
+			type = "event"
+		},
+		disable_environment = {
+			accessibility = "public",
+			type = "event"
+		}
+	}
+}
+
+return ShadingEnvironmentVolume

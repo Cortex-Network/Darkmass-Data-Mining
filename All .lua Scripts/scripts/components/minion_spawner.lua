@@ -1,0 +1,301 @@
+local Component = require("scripts/utilities/component")
+local MinionSpawnerSpawnPosition = require("scripts/extension_systems/minion_spawner/utilities/minion_spawner_spawn_position")
+local SharedNav = require("scripts/components/utilities/shared_nav")
+local MinionSpawner = component("MinionSpawner")
+
+function MinionSpawner:init(unit, is_server)
+	self._unit = unit
+	self._is_server = is_server
+	local spawner_extension = ScriptUnit.fetch_component_extension(unit, "minion_spawner_system")
+
+	if spawner_extension then
+		local spawner_groups, spawn_position_offset, exit_position_offset, anim_data, exclude_from_pacing = self:_get_data(unit)
+		self._anim_data = anim_data
+		local tm = Unit.world_pose(unit, 1)
+		local spawn_position = Matrix4x4.transform(tm, spawn_position_offset:unbox())
+		local exit_position = Matrix4x4.transform(tm, exit_position_offset:unbox())
+
+		spawner_extension:setup_from_component(spawner_groups, spawn_position, exit_position, exclude_from_pacing)
+	end
+end
+
+function MinionSpawner:_get_data(unit)
+	local spawner_groups = self:get_data(unit, "spawner_groups")
+	local spawn_position_offset = self:get_data(unit, "spawn_offset")
+	local exit_position_offset = self:get_data(unit, "exit_offset")
+	local anim_duration = self:get_data(unit, "duration")
+	local anim_data = nil
+
+	if anim_duration ~= 0 then
+		local anim_length = Unit.simple_animation_length(unit)
+		local spawning_started_anim = {
+			time_from = self:get_data(unit, "spawning_started_time_from") * anim_length,
+			time_to = self:get_data(unit, "spawning_started_time_to") * anim_length
+		}
+		spawning_started_anim.speed = (spawning_started_anim.time_to - spawning_started_anim.time_from) / anim_duration
+		local spawning_done_anim = {
+			time_from = self:get_data(unit, "spawning_done_time_from") * anim_length,
+			time_to = self:get_data(unit, "spawning_done_time_to") * anim_length
+		}
+		spawning_done_anim.speed = (spawning_done_anim.time_to - spawning_done_anim.time_from) / anim_duration
+		anim_data = {
+			spawning_started = spawning_started_anim,
+			spawning_done = spawning_done_anim
+		}
+	end
+
+	local exclude_from_pacing = self:get_data(unit, "exclude_from_pacing")
+
+	return spawner_groups, spawn_position_offset, exit_position_offset, anim_data, exclude_from_pacing
+end
+
+function MinionSpawner:destroy()
+end
+
+function MinionSpawner:enable(unit)
+end
+
+function MinionSpawner:disable(unit)
+end
+
+function MinionSpawner.events:minion_spawner_spawning_started()
+	if self._is_server then
+		Component.trigger_event_on_clients(self, "minion_spawner_spawning_started")
+	end
+
+	local anim_data = self._anim_data
+
+	Unit.flow_event(self._unit, "lua_spawning_started")
+
+	if anim_data then
+		local data = anim_data.spawning_started
+
+		Unit.play_simple_animation(self._unit, data.time_from, data.time_to, false, data.speed)
+	end
+end
+
+function MinionSpawner.events:minion_spawner_spawning_done()
+	if self._is_server then
+		Component.trigger_event_on_clients(self, "minion_spawner_spawning_done")
+	end
+
+	local anim_data = self._anim_data
+
+	Unit.flow_event(self._unit, "lua_spawning_done")
+
+	if anim_data then
+		local data = anim_data.spawning_done
+
+		Unit.play_simple_animation(self._unit, data.time_from, data.time_to, false, data.speed)
+	end
+end
+
+function MinionSpawner:editor_init(unit)
+	if not rawget(_G, "LevelEditor") then
+		return
+	end
+
+	self._unit = unit
+	local world = Application.main_world()
+	self._world = world
+	self._line_object = World.create_line_object(world)
+	self._drawer = DebugDrawer(self._line_object, "retained")
+	local _, spawn_offset, exit_offset = self:_get_data(unit)
+	self._spawn_offset = spawn_offset
+	self._exit_offset = exit_offset
+
+	if MinionSpawner._nav_info == nil then
+		MinionSpawner._nav_info = SharedNav.create_nav_info()
+	end
+
+	self._my_nav_gen_guid = nil
+	self._active_debug_draw = false
+	self._should_debug_draw = false
+
+	return true
+end
+
+function MinionSpawner:editor_destroy(unit)
+	if not rawget(_G, "LevelEditor") then
+		return
+	end
+
+	local line_object = self._line_object
+	local world = self._world
+
+	LineObject.reset(line_object)
+	LineObject.dispatch(world, line_object)
+	World.destroy_line_object(world, line_object)
+
+	self._line_object = nil
+	self._world = nil
+end
+
+function MinionSpawner:editor_update(unit)
+	if not rawget(_G, "LevelEditor") then
+		return false
+	end
+
+	local with_traverse_logic = true
+	local nav_gen_guid = SharedNav.check_new_navmesh_generated(MinionSpawner._nav_info, self._my_nav_gen_guid, with_traverse_logic)
+
+	if nav_gen_guid then
+		self._my_nav_gen_guid = nav_gen_guid
+
+		self:_editor_debug_draw(unit)
+	end
+
+	local should_debug_draw = self._should_debug_draw
+
+	if should_debug_draw ~= self._active_debug_draw and self._my_nav_gen_guid then
+		self._active_debug_draw = should_debug_draw
+
+		self:_editor_debug_draw(unit)
+	end
+
+	return true
+end
+
+function MinionSpawner:_editor_debug_draw(unit)
+	local drawer = self._drawer
+
+	drawer:reset()
+
+	if self._active_debug_draw then
+		local nav_world = MinionSpawner._nav_info.nav_world
+		local traverse_logic = MinionSpawner._nav_info.traverse_logic
+		local spawn_offset = self._spawn_offset:unbox()
+		local exit_offset = self._exit_offset:unbox()
+		local tm = Unit.world_pose(unit, 1)
+		local spawn_position = Matrix4x4.transform(tm, spawn_offset)
+		local exit_position = Matrix4x4.transform(tm, exit_offset)
+		local exit_position_on_nav_mesh = MinionSpawnerSpawnPosition.find_exit_position_on_nav_mesh(nav_world, spawn_position, exit_position, traverse_logic)
+
+		drawer:sphere(spawn_position, 0.2, Color.white())
+
+		if exit_position_on_nav_mesh then
+			drawer:sphere(exit_position_on_nav_mesh, 0.2, Color.green())
+			drawer:line(spawn_position, exit_position_on_nav_mesh, Color.green())
+		else
+			drawer:sphere(exit_position, 0.2, Color.red())
+			drawer:line(spawn_position, exit_position, Color.red())
+		end
+	end
+
+	drawer:update(self._world)
+end
+
+function MinionSpawner:editor_world_transform_modified(unit)
+	if not rawget(_G, "LevelEditor") then
+		return
+	end
+
+	self:_editor_debug_draw(unit)
+end
+
+function MinionSpawner:editor_toggle_debug_draw(enable)
+	if not rawget(_G, "LevelEditor") then
+		return
+	end
+
+	self._should_debug_draw = enable
+end
+
+function MinionSpawner:debug_started_animation()
+	Component.event(self._unit, "minion_spawner_spawning_started")
+end
+
+function MinionSpawner:debug_done_animation()
+	Component.event(self._unit, "minion_spawner_spawning_done")
+end
+
+MinionSpawner.component_data = {
+	spawn_offset = {
+		ui_type = "vector",
+		category = "Position Offset",
+		ui_name = "Spawn Position Offset",
+		step = 0.5,
+		value = Vector3Box(0, 0, 0)
+	},
+	exit_offset = {
+		ui_type = "vector",
+		category = "Position Offset",
+		ui_name = "Exit Position Offset",
+		step = 0.5,
+		value = Vector3Box(0, 1, 0)
+	},
+	spawning_started_time_from = {
+		ui_type = "number",
+		min = 0,
+		step = 0.1,
+		category = "Spawning Started",
+		value = 0,
+		decimals = 1,
+		ui_name = "Time From (Normalized)",
+		max = 1
+	},
+	spawning_started_time_to = {
+		ui_type = "number",
+		min = 0,
+		step = 0.1,
+		category = "Spawning Started",
+		value = 1,
+		decimals = 1,
+		ui_name = "Time To (Normalized)",
+		max = 1
+	},
+	spawning_done_time_from = {
+		ui_type = "number",
+		min = 0,
+		step = 0.1,
+		category = "Spawning Done",
+		value = 0,
+		decimals = 1,
+		ui_name = "Time From (Normalized)",
+		max = 1
+	},
+	spawning_done_time_to = {
+		ui_type = "number",
+		min = 0,
+		step = 0.1,
+		category = "Spawning Done",
+		value = 1,
+		decimals = 1,
+		ui_name = "Time To (Normalized)",
+		max = 1
+	},
+	duration = {
+		ui_type = "number",
+		min = 0,
+		decimals = 1,
+		value = 0,
+		ui_name = "Duration (0 if no animation)",
+		step = 0.1
+	},
+	spawner_groups = {
+		ui_type = "text_box_array",
+		size = 0,
+		ui_name = "Spawner Groups",
+		category = "Spawner Groups"
+	},
+	exclude_from_pacing = {
+		ui_type = "check_box",
+		value = false,
+		ui_name = "Exclude From Pacing"
+	},
+	inputs = {
+		debug_started_animation = {
+			accessibility = "public",
+			type = "event"
+		},
+		debug_done_animation = {
+			accessibility = "public",
+			type = "event"
+		}
+	},
+	extensions = {
+		"MinionSpawnerExtension"
+	}
+}
+
+return MinionSpawner

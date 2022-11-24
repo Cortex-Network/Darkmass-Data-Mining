@@ -1,0 +1,30 @@
+local sounds = {
+	sfx_tongue_in = "wwise/events/minions/play_beast_of_nurgle_tongue_in",
+	vce_death = "wwise/events/minions/play_beast_of_nurgle_vce_death",
+	sfx_attack_movement_tail_slam = "wwise/events/minions/play_beast_of_nurgle_attack_movement_tail_slam",
+	sfx_attack_movement_arm = "wwise/events/minions/play_beast_of_nurgle_attack_movement_arm",
+	vce_pre_vomit = "wwise/events/minions/play_beast_of_nurgle_vce_pre_vomit",
+	vce_grunt = "wwise/events/minions/play_beast_of_nurgle_vce_grunt",
+	vce_huuh = "wwise/events/minions/play_beast_of_nurgle_vce_huuh",
+	vce_eat = "wwise/events/minions/play_beast_of_nurgle_vce_eat",
+	vce_excited = "wwise/events/minions/play_beast_of_nurgle_vce_excited",
+	sfx_footstep_left_walk = "wwise/events/minions/play_beast_of_nurge_footstep_walk",
+	vce_run_breath = "wwise/events/minions/play_beast_of_nurgle_vce_run_breath",
+	vce_spit = "wwise/events/minions/play_beast_of_nurgle_vce_spit",
+	sfx_footstep_left = "wwise/events/minions/play_beast_of_nurge_footstep",
+	vce_spit_short = "wwise/events/minions/play_beast_of_nurgle_vce_spit_short",
+	vce_swallow = "wwise/events/minions/play_beast_of_nurgle_vce_swallow",
+	sfx_footstep_right = "wwise/events/minions/play_beast_of_nurge_footstep",
+	sfx_tongue_out = "wwise/events/minions/play_beast_of_nurgle_tongue_out",
+	sfx_movement_short = "wwise/events/minions/play_beast_of_nurgle_movement_short",
+	vce_attack = "wwise/events/minions/play_beast_of_nurgle_vce_attack",
+	sfx_jump_land = "wwise/events/minions/play_beast_of_nurgle_jump_land",
+	vce_hurt = "wwise/events/minions/play_beast_of_nurgle_vce_hurt",
+	sfx_attack_movement_tail_whip = "wwise/events/minions/play_beast_of_nurgle_attack_movement_tail_whip",
+	sfx_movement_long = "wwise/events/minions/play_beast_of_nurgle_movement_long",
+	vce_chew = "wwise/events/minions/play_beast_of_nurgle_vce_chew",
+	sfx_footstep_right_walk = "wwise/events/minions/play_beast_of_nurge_footstep_walk",
+	vce_happy_scream = "wwise/events/minions/play_beast_of_nurgle_vce_happy_scream"
+}
+
+return sounds

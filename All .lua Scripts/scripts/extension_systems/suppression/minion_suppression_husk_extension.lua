@@ -1,0 +1,40 @@
+local MinionSuppressionHuskExtension = class("MinionSuppressionHuskExtension")
+local CLIENT_RPCS = {
+	"rpc_server_reported_unit_suppression"
+}
+
+function MinionSuppressionHuskExtension:init(extension_init_context, unit, extension_init_data, game_session, game_object_id)
+	local is_server = extension_init_context.is_server
+	self._unit = unit
+	self._breed = extension_init_data.breed
+	local network_event_delegate = extension_init_context.network_event_delegate
+	self._network_event_delegate = network_event_delegate
+	self._game_object_id = game_object_id
+
+	network_event_delegate:register_session_unit_events(self, game_object_id, unpack(CLIENT_RPCS))
+
+	self._unit_rpcs_registered = true
+	self._is_suppressed = false
+end
+
+function MinionSuppressionHuskExtension:destroy()
+	self._network_event_delegate:unregister_unit_events(self._game_object_id, unpack(CLIENT_RPCS))
+end
+
+function MinionSuppressionHuskExtension:handle_unit_suppression(is_suppressed)
+	local unit = self._unit
+
+	Managers.event:trigger("event_unit_suppression", unit, is_suppressed)
+
+	self._is_suppressed = is_suppressed
+end
+
+function MinionSuppressionHuskExtension:is_suppressed()
+	return self._is_suppressed
+end
+
+function MinionSuppressionHuskExtension:rpc_server_reported_unit_suppression(channel_id, suppressed_unit_id, is_suppressed)
+	self:handle_unit_suppression(is_suppressed)
+end
+
+return MinionSuppressionHuskExtension

@@ -1,0 +1,595 @@
+local GameSessionManager = class("GameSessionManager")
+local NETWORK_EVENTS = {
+	"game_object_migrated_to_me",
+	"game_object_created",
+	"game_object_destroyed",
+	"game_session_disconnect",
+	"rpc_debug_crash_server"
+}
+
+local function _info(...)
+	Log.info("GameSessionManager", ...)
+end
+
+GameSessionManager.DELAYED_DISCONNECT_TIME = 1
+
+function GameSessionManager:init()
+	self._peer_id = Network.peer_id()
+	self._session_disconnected = false
+	self._is_server = nil
+	self._engine_game_session = Network.create_game_session()
+	local event_delegate = Managers.connection:network_event_delegate()
+
+	event_delegate:register_session_events(self, unpack(NETWORK_EVENTS))
+
+	self._event_delegate = event_delegate
+	self._peer_to_channel = {}
+	self._channel_to_peer = {}
+	self._session_client = nil
+	self._session_host = nil
+	self._joined_peers_cache = {}
+	self._delayed_peer_disconnects = {}
+	self._connected_to_host = false
+end
+
+function GameSessionManager:destroy()
+	local event_delegate = self._event_delegate
+
+	event_delegate:unregister_events(unpack(NETWORK_EVENTS))
+
+	self._event_delegate = nil
+
+	self:disconnect()
+
+	if self._engine_game_session then
+		Network.shutdown_game_session()
+
+		self._engine_game_session = nil
+	end
+end
+
+function GameSessionManager:peer_to_channel(peer_id)
+	return self._peer_to_channel[peer_id]
+end
+
+function GameSessionManager:channel_to_peer(channel_id)
+	return self._channel_to_peer[channel_id]
+end
+
+function GameSessionManager:connected_to_host()
+	return self._connected_to_host
+end
+
+function GameSessionManager:connected_to_client(peer_id)
+	return self._joined_peers_cache[peer_id] == true
+end
+
+function GameSessionManager:joined_peers()
+	return self._joined_peers_cache
+end
+
+function GameSessionManager:is_host()
+	return self._session_host and true or false
+end
+
+function GameSessionManager:is_client()
+	return self._session_client and true or false
+end
+
+function GameSessionManager:host()
+	if self._session_host then
+		return Network.peer_id()
+	end
+
+	if self._session_client then
+		return self._session_client:host()
+	end
+end
+
+function GameSessionManager:num_clients()
+	local session_host = self._session_host
+
+	return session_host and session_host:num_clients() or 0
+end
+
+function GameSessionManager:disconnect()
+	if self._session_host then
+		for peer_id, _ in pairs(self._joined_peers_cache) do
+			local engine_reason = nil
+
+			self:_client_left(self:peer_to_channel(peer_id), peer_id, "game_session_manager_disconnect", engine_reason)
+		end
+
+		self._session_host:delete()
+
+		self._session_host = nil
+	end
+
+	if self._session_client then
+		for peer_id, _ in pairs(self._joined_peers_cache) do
+			local engine_reason = nil
+
+			self:_member_left(self:peer_to_channel(peer_id), peer_id, "game_session_manager_disconnect", engine_reason)
+		end
+
+		self._session_client:delete()
+
+		self._session_client = nil
+	end
+
+	table.clear(self._peer_to_channel)
+	table.clear(self._channel_to_peer)
+	table.clear(self._joined_peers_cache)
+	table.clear(self._delayed_peer_disconnects)
+end
+
+function GameSessionManager:delayed_disconnects(result)
+	table.clear(result)
+
+	for peer_id, time in pairs(self._delayed_peer_disconnects) do
+		if GameSessionManager.DELAYED_DISCONNECT_TIME <= time then
+			result[#result + 1] = peer_id
+		end
+	end
+
+	for _, peer_id in ipairs(result) do
+		self._delayed_peer_disconnects[peer_id] = nil
+	end
+end
+
+function GameSessionManager:set_session_client(session_client)
+	self:disconnect()
+
+	self._is_server = false
+	self._session_client = session_client
+end
+
+function GameSessionManager:set_session_host(session_host)
+	self:disconnect()
+
+	self._is_server = true
+	self._session_host = session_host
+	self._joined_peers_cache[Network.peer_id()] = true
+end
+
+function GameSessionManager:leave()
+	self._session_client:leave()
+end
+
+function GameSessionManager:update(dt)
+	if self._session_host then
+		self:_update_host(dt)
+	end
+
+	if self._session_client then
+		self:_update_client(dt)
+	end
+
+	self:_update_delayed_disconnects(dt)
+
+	return self._session_disconnected
+end
+
+function GameSessionManager:game_session()
+	return self._engine_game_session
+end
+
+function GameSessionManager:can_send_session_bound_rpcs()
+	if self._engine_game_session then
+		return GameSession.in_session(self._engine_game_session)
+	else
+		return false
+	end
+end
+
+function GameSessionManager:is_server()
+	return self._is_server
+end
+
+function GameSessionManager:add_peer(peer_id)
+	self._session_host:add(peer_id, self)
+end
+
+function GameSessionManager:remove_peer(peer_id)
+	local session_host = self._session_host
+
+	if not session_host:has_client(peer_id) then
+		return
+	end
+
+	session_host:remove(peer_id)
+
+	while true do
+		local event, parameters = session_host:next_event_by_peer(peer_id)
+
+		if event == nil then
+			break
+		end
+
+		self:_handle_host_event(event, parameters)
+
+		if not session_host:has_client(peer_id) then
+			break
+		end
+	end
+end
+
+function GameSessionManager.game_object_migrated_to_me(id, old_owner_id)
+	Log.info("GameSessionManager", "successfully migrated %i from %s", id, old_owner_id)
+end
+
+function GameSessionManager:game_object_created(game_object_id, owner_peer_id)
+	local type = NetworkLookup.game_object_types[GameSession.game_object_field(self._engine_game_session, game_object_id, "game_object_type")]
+	local unit_spawner = Managers.state.unit_spawner
+
+	if unit_spawner:is_unit_template(type) then
+		unit_spawner:spawn_husk_unit(game_object_id, owner_peer_id)
+	end
+
+	if type == "music_parameters" then
+		local unit_game_object_id = GameSession.game_object_field(self._engine_game_session, game_object_id, "unit_game_object_id")
+		local unit = unit_spawner:unit(unit_game_object_id)
+		local music_parameter_extension = ScriptUnit.extension(unit, "music_parameter_system")
+
+		music_parameter_extension:on_game_object_created(self._engine_game_session, game_object_id)
+	elseif type == "scanning_device" then
+		local level_unit_id = GameSession.game_object_field(self._engine_game_session, game_object_id, "level_unit_id")
+		local unit = unit_spawner:unit(level_unit_id, true)
+		local scanning_event_extension = ScriptUnit.extension(unit, "scanning_event_system")
+
+		scanning_event_extension:on_game_object_created(game_object_id)
+	elseif type == "server_unit_data_state" then
+		local unit_game_object_id = GameSession.game_object_field(self._engine_game_session, game_object_id, "unit_game_object_id")
+		local unit = unit_spawner:unit(unit_game_object_id)
+		local player_unit_spawn_manager = Managers.state.player_unit_spawn
+		local player = player_unit_spawn_manager:owner(unit)
+
+		if player and not player.remote then
+			local unit_data_extension = ScriptUnit.extension(unit, "unit_data_system")
+
+			unit_data_extension:on_server_data_state_game_object_created(self._engine_game_session, game_object_id)
+		end
+	elseif type == "server_husk_data_state" or type == "server_husk_hud_data_state" then
+		local unit_game_object_id = GameSession.game_object_field(self._engine_game_session, game_object_id, "unit_game_object_id")
+		local unit = unit_spawner:unit(unit_game_object_id)
+		local unit_data_extension = ScriptUnit.extension(unit, "unit_data_system")
+
+		if type == "server_husk_data_state" then
+			unit_data_extension:on_server_husk_data_state_game_object_created(game_object_id)
+		elseif type == "server_husk_hud_data_state" then
+			unit_data_extension:on_server_husk_hud_data_state_game_object_created(game_object_id)
+		end
+	end
+end
+
+function GameSessionManager:game_object_destroyed(game_object_id, owner_peer_id)
+	local type = NetworkLookup.game_object_types[GameSession.game_object_field(self._engine_game_session, game_object_id, "game_object_type")]
+	local unit_spawner = Managers.state.unit_spawner
+
+	if unit_spawner:is_unit_template(type) then
+		unit_spawner:destroy_game_object_unit(game_object_id, owner_peer_id)
+	end
+
+	if type == "scanning_device" then
+		local level_unit_id = GameSession.game_object_field(self._engine_game_session, game_object_id, "level_unit_id")
+		local scanning_device_unit = nil
+
+		if unit_spawner:valid_unit_id(level_unit_id) then
+			scanning_device_unit = unit_spawner:unit(level_unit_id)
+		end
+
+		if scanning_device_unit then
+			local scanning_device_extension = ScriptUnit.has_extension(scanning_device_unit, "scanning_event_system")
+
+			if scanning_device_extension then
+				scanning_device_extension:on_game_object_destroyed()
+			end
+		end
+	elseif type == "music_parameters" then
+		local unit_game_object_id = GameSession.game_object_field(self._engine_game_session, game_object_id, "unit_game_object_id")
+		local unit = unit_spawner:unit(unit_game_object_id)
+		local music_parameter_extension = ScriptUnit.extension(unit, "music_parameter_system")
+
+		music_parameter_extension:on_game_object_destroyed(self._engine_game_session, game_object_id)
+	end
+end
+
+function GameSessionManager:game_session_disconnect()
+	self._session_disconnected = true
+end
+
+function GameSessionManager:game_session_disconnected()
+	return self._session_disconnected
+end
+
+function GameSessionManager:set_simulated_packet_loss(frequency)
+	Application.console_command("network", "packet_loss", frequency)
+end
+
+function GameSessionManager:set_simulated_packet_duplication(frequency)
+	Application.console_command("network", "duplication", frequency)
+end
+
+function GameSessionManager:rpc_set_simulated_latency(channel_id, min, max)
+	Application.console_command("network", "latency", tostring(min), tostring(max))
+end
+
+function GameSessionManager:rpc_debug_crash_server(channel_id, user_name)
+	self:debug_crash_server(user_name)
+end
+
+function GameSessionManager:debug_crash_server(user_name)
+end
+
+function GameSessionManager:send_rpc_clients(rpc_name, ...)
+	local rpc = RPC[rpc_name]
+
+	for peer, _ in pairs(self._joined_peers_cache) do
+		if peer ~= self._peer_id then
+			local channel = self:peer_to_channel(peer)
+
+			rpc(channel, ...)
+		end
+	end
+end
+
+function GameSessionManager:send_rpc_clients_except(rpc_name, except_channel_id, ...)
+	local rpc = RPC[rpc_name]
+	local except_peer = self:channel_to_peer(except_channel_id)
+
+	for peer, _ in pairs(self._joined_peers_cache) do
+		if peer ~= self._peer_id and peer ~= except_peer then
+			local channel = self:peer_to_channel(peer)
+
+			rpc(channel, ...)
+		end
+	end
+end
+
+function GameSessionManager:send_rpc_client(rpc_name, peer, ...)
+	local joined_peers_cache = self._joined_peers_cache
+	local rpc = RPC[rpc_name]
+	local channel = self:peer_to_channel(peer)
+
+	rpc(channel, ...)
+end
+
+function GameSessionManager:send_rpc_clients_list(rpc_name, client_list, ...)
+	local rpc = RPC[rpc_name]
+	local joined_peers_cache = self._joined_peers_cache
+
+	for peer, _ in pairs(client_list) do
+		if peer ~= self._peer_id then
+			local channel = self:peer_to_channel(peer)
+
+			rpc(channel, ...)
+		end
+	end
+end
+
+function GameSessionManager:send_rpc_server(rpc_name, ...)
+	local host_channel = self._session_client:host_channel()
+
+	RPC[rpc_name](host_channel, ...)
+end
+
+function GameSessionManager:_update_host(dt)
+	local session_host = self._session_host
+
+	session_host:update(dt)
+
+	while true do
+		local event, parameters = session_host:next_event()
+
+		if event == nil then
+			break
+		end
+
+		self:_handle_host_event(event, parameters)
+	end
+end
+
+function GameSessionManager:_handle_host_event(event, parameters)
+	if event == "session_joined" then
+		local peer_id = parameters.peer_id
+		local channel_id = parameters.channel_id
+
+		self:_client_joined(channel_id, peer_id)
+	elseif event == "session_left" then
+		local peer_id = parameters.peer_id
+		local channel_id = parameters.channel_id
+
+		self:_client_left(channel_id, peer_id, parameters.game_reason, parameters.engine_reason)
+	end
+end
+
+function GameSessionManager:_update_client(dt)
+	local session_client = self._session_client
+
+	session_client:update(dt)
+
+	while true do
+		local event, parameters = session_client:next_event()
+
+		if event == nil then
+			break
+		end
+
+		if event == "session_joined" then
+			local peer_id = parameters.peer_id
+			local channel_id = parameters.channel_id
+
+			self:_member_joined(channel_id, peer_id)
+		elseif event == "session_left" then
+			local peer_id = parameters.peer_id
+			local channel_id = parameters.channel_id
+
+			self:_member_left(channel_id, peer_id, parameters.game_reason, parameters.engine_reason)
+		end
+	end
+end
+
+function GameSessionManager:_client_joined(channel_id, peer_id)
+	_info("Member %s joined", peer_id)
+
+	self._channel_to_peer[channel_id] = peer_id
+	self._peer_to_channel[peer_id] = channel_id
+	self._delayed_peer_disconnects[peer_id] = nil
+	self._joined_peers_cache[peer_id] = true
+
+	self:_set_session_channel_on_player(channel_id, peer_id)
+
+	local local_player_id = 1
+	local player = Managers.player:player(peer_id, local_player_id)
+
+	player:create_input_handler()
+	Managers.state.game_mode:hot_join_sync(peer_id, channel_id)
+	Managers.state.extension:hot_join_sync(peer_id, channel_id)
+	Managers.state.nav_mesh:hot_join_sync(peer_id, channel_id)
+	Managers.state.network_story:hot_join_sync(peer_id, channel_id)
+	Managers.state.networked_flow_state:hot_join_sync(peer_id, channel_id)
+	Managers.state.mutator:hot_join_sync(peer_id, channel_id)
+	Managers.state.cinematic:hot_join_sync(peer_id, channel_id)
+	RPC.rpc_is_fully_hot_join_synced(channel_id)
+	Managers.event:trigger("host_game_session_manager_player_joined", peer_id, player)
+
+	local player_spawner_system = Managers.state.extension:system("player_spawner_system")
+	local position, rotation, parent, side_name = player_spawner_system:next_free_spawn_point()
+	local player_unit_spawn_manager = Managers.state.player_unit_spawn
+	local force_spawn = true
+	local is_respawn = false
+
+	player_unit_spawn_manager:spawn_player(player, position, rotation, parent, force_spawn, side_name, nil, "walking", is_respawn)
+end
+
+function GameSessionManager:_client_left(channel_id, peer_id, game_reason, engine_reason)
+	local source = game_reason and "game" or "engine"
+	local reason = game_reason or engine_reason
+
+	_info("Member %s left with %s reason %s", peer_id, source, reason)
+
+	self._joined_peers_cache[peer_id] = nil
+
+	if engine_reason ~= "remote_disconnected" then
+		self._delayed_peer_disconnects[peer_id] = 0
+	end
+
+	if peer_id == self._peer_id then
+		return
+	end
+
+	if channel_id then
+		self._channel_to_peer[channel_id] = nil
+		self._peer_to_channel[peer_id] = nil
+	end
+
+	local players_at_peer = Managers.player:players_at_peer(peer_id)
+
+	if players_at_peer then
+		local player_unit_spawn_manager = Managers.state.player_unit_spawn
+		local unit_spawner_manager = Managers.state.unit_spawner
+
+		for local_player_id, player in pairs(players_at_peer) do
+			local owned_units = player.owned_units
+			local player_unit = player.player_unit
+
+			for unit in pairs(owned_units) do
+				if unit ~= player_unit then
+					unit_spawner_manager:mark_for_deletion(unit)
+				end
+			end
+
+			player_unit_spawn_manager:despawn(player)
+
+			if player.input_handler then
+				player:destroy_input_handler()
+			end
+		end
+	end
+
+	self:_set_session_channel_on_player(nil, peer_id)
+	Managers.event:trigger("host_game_session_manager_player_left", peer_id)
+end
+
+function GameSessionManager:_session_joined(channel_id, peer_id)
+	self:_set_session_channel_on_player(channel_id, peer_id)
+
+	self._connected_to_host = true
+end
+
+function GameSessionManager:_session_left(peer_id)
+	if peer_id ~= nil then
+		self:_set_session_channel_on_player(nil, peer_id)
+	end
+
+	self._connected_to_host = false
+	self._session_disconnected = true
+end
+
+function GameSessionManager:_member_joined(channel_id, peer_id)
+	_info("Member %s joined", peer_id)
+
+	local session_client = self._session_client
+
+	if channel_id then
+		self._channel_to_peer[channel_id] = peer_id
+		self._peer_to_channel[peer_id] = channel_id
+	end
+
+	if peer_id == session_client:host() then
+		self._delayed_peer_disconnects[peer_id] = nil
+
+		self:_session_joined(channel_id, peer_id)
+	end
+
+	self._joined_peers_cache[peer_id] = true
+end
+
+function GameSessionManager:_member_left(channel_id, peer_id, game_reason, engine_reason)
+	if channel_id then
+		local source = game_reason and "game" or "engine"
+		local reason = game_reason or engine_reason
+
+		_info("Member %s left with %s reason %s", peer_id, source, reason)
+	else
+		_info("Member %s left", peer_id)
+	end
+
+	local session_client = self._session_client
+
+	if peer_id then
+		self._joined_peers_cache[peer_id] = nil
+	end
+
+	if peer_id == nil or peer_id == session_client:host() then
+		if peer_id then
+			self._delayed_peer_disconnects[peer_id] = 0
+		end
+
+		self:_session_left(peer_id)
+	end
+
+	if channel_id then
+		self._channel_to_peer[channel_id] = nil
+		self._peer_to_channel[peer_id] = nil
+	end
+end
+
+function GameSessionManager:_set_session_channel_on_player(channel_id, peer_id)
+	local player_manager = Managers.player
+	local players_at_peer = player_manager:players_at_peer(peer_id)
+
+	if players_at_peer then
+		for local_player_id, player in pairs(players_at_peer) do
+			player:set_session_channel_id(channel_id)
+		end
+	end
+end
+
+function GameSessionManager:_update_delayed_disconnects(dt)
+	for peer_id, time in pairs(self._delayed_peer_disconnects) do
+		self._delayed_peer_disconnects[peer_id] = time + dt
+	end
+end
+
+return GameSessionManager
